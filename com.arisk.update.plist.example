@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS 自动更新模板。使用方法：
+     1. 把下面所有 __ARISK_DIR__ 替换成本仓库的绝对路径（如 /Users/你的用户名/arisk）
+        sed "s|__ARISK_DIR__|$HOME/arisk|g" com.arisk.update.plist.example > com.arisk.update.plist
+     2. cp com.arisk.update.plist ~/Library/LaunchAgents/
+     3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.arisk.update.plist
+     Linux 用户改用 cron：10 16-22 * * * /bin/bash __ARISK_DIR__/check_and_update.sh -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.arisk.update</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__ARISK_DIR__/check_and_update.sh</string>
+  </array>
+
+  <!-- 每天 16:10 / 17:10 / … / 22:10 各跑一次判断。
+       check_and_update.sh 内部：数据已是最新→秒退；落后→抓当天收盘数据。 -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>10</integer></dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__ARISK_DIR__/logs/launchd_update.log</string>
+  <key>StandardErrorPath</key>
+  <string>__ARISK_DIR__/logs/launchd_update.err</string>
+</dict>
+</plist>

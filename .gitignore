@@ -1,0 +1,21 @@
+# 密钥 —— 绝不提交
+.env
+
+# Python 虚拟环境（166MB，各平台自建）
+venv/
+__pycache__/
+*.pyc
+
+# 运行时日志与状态
+logs/
+*.log
+.arisk_nontrading_dates
+
+# 本机专属的 launchd 配置（含绝对路径），仅提交 .example 模板
+com.arisk.update.plist
+
+# 下载的第三方文档
+miaoxiang_doc.md
+
+# 系统杂项
+.DS_Store
