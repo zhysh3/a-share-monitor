@@ -93,6 +93,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         params = urllib.parse.parse_qs(parsed.query)
 
+        # ── 语义端点：直接用每日更新的 arisk_data.json 供数据 ──
+        # 看板通过这些端点判断"是否实时"(detectEnv 探测 /pe)并读取当日数据；
+        # 本通用反代版原本缺这些端点，导致看板一直退回静态备用值。
+        semantic = self._semantic(parsed.path)
+        if semantic is not None:
+            self._json(semantic)
+            return
+
         if "url" not in params:
             self._error(400, "Missing ?url= parameter")
             return
@@ -203,6 +211,45 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(json.dumps({"error": msg}).encode())
+
+    def _json(self, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _semantic(self, path):
+        """看板语义端点 → 直接读同目录每日更新的 arisk_data.json。
+        返回 None 表示不是语义端点（交回通用 ?url= 反代处理）。"""
+        import os
+        routes = {"/pe", "/bond", "/prebuilt", "/sectors", "/margin", "/sf", "/fund"}
+        if path not in routes:
+            return None
+        data_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arisk_data.json")
+        try:
+            with open(data_file, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        if path == "/pe":
+            return {"pe": d.get("pe_300"), "pb": None}
+        if path == "/bond":
+            b = d.get("bond10y") or {}
+            return {"yield": b.get("latest"), "hist": b.get("hist", [])}
+        if path == "/prebuilt":
+            return d
+        if path == "/sectors":
+            return d.get("sector_live", [])
+        if path == "/margin":
+            return (d.get("margin") or {}).get("monthly", [])
+        if path == "/sf":
+            return d.get("m2_monthly", [])
+        if path == "/fund":
+            return d.get("fund_issuance", [])
+        return None
 
 
 if __name__ == "__main__":
