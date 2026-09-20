@@ -6,6 +6,7 @@ set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
+mkdir -p logs
 [ -f .env ] && source .env
 PY="$DIR/venv/bin/python"
 HTTP_PORT=8788
@@ -27,8 +28,13 @@ if is_up "$URL"; then
   echo "✓ 网页服务已在运行 ($HTTP_PORT)"
 else
   nohup "$PY" -m http.server "$HTTP_PORT" >> logs/http.log 2>&1 &
-  sleep 1
-  echo "✓ 网页服务已启动 ($HTTP_PORT)"
+  sleep 2
+  if is_up "$URL"; then
+    echo "✓ 网页服务已启动 ($HTTP_PORT)"
+  else
+    echo "✗ 网页服务启动失败，看 logs/http.log；最常见原因是没建虚拟环境（python3 -m venv venv && ./venv/bin/pip install -r requirements.txt）"
+    exit 1
+  fi
 fi
 
 echo ""
