@@ -1156,9 +1156,9 @@ async function fetchAll(force){
   // sectorLive 来自 /sectors 端点：[{code,name,today,ret60,date}, ...] 已按 ret60 降序
   if((sectorLive||[]).length>=8){
     st.sectors=sectorLive.map(s=>({
-      n:s.name,
+      n:s.name||s.n,                // /sectors 返回的字段是 n，保留 name 兼容旧数据
       bkCode:s.code,
-      excess:Number(s.today)||0,    // 今日涨跌（最新收盘日）
+      excess:Number(s.today!==undefined?s.today:s.excess)||0,    // 今日涨跌（最新收盘日）
       ret60:Number(s.ret60)||0,     // 60日累计涨跌
       date:s.date,
     }));
