@@ -1,5 +1,9 @@
 # A股风险监视器 依赖
 # 安装：python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+# 行情主源：moomoo OpenAPI（需本机运行 moomoo OpenD 网关，默认 127.0.0.1:11111）
+# 也兼容富途 futu-api（二选一即可，moomoo_market.py 优先 import moomoo）
+moomoo-api>=9.0
+# 宏观数据 + moomoo 不可用时的行情回退
 akshare>=1.18.88
 pandas>=2.0
 requests>=2.31

@@ -3,10 +3,16 @@
 
 由 cron 在交易日 16:10 调用。优先 MX API（社融存量同比），失败回退 AKShare M2 同比。
 所有 section 独立 try/except；某段失败时复用旧 JSON 对应字段，整体不退出。
+
+行情部分（指数日 K / 成交额 / HV30 / ETF 现价）首选 moomoo OpenAPI（见 moomoo_market.py，
+需本机跑 moomoo OpenD）；OpenD 不可用时自动回退到原来的 AKShare / 新浪源。
+宏观部分（社融、国债、两融、申万行业、涨跌停、基金新发）moomoo 不提供，仍走原数据源。
 """
 import json, os, sys, time, traceback
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import moomoo_market as mm
 
 OUT_PATH = os.environ.get('ARISK_OUT') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'arisk_data.json')
 MX_KEY = os.environ.get('MX_APIKEY', '')
@@ -180,15 +186,40 @@ def fetch_pe_300():
         log(f"  ✗ pe_300 失败: {e}")
         return fallback('pe_300')
 
+# ── 行情统一入口：moomoo 优先，AKShare/新浪回退 ─────────────
+def index_daily(symbol, days=400):
+    """指数/ETF 日 K（升序）→ [{'date','close','volume','turnover'}]，全失败返回 []。
+
+    turnover（成交额，元）只有 moomoo 源才有；新浪回退源给不出，置 None，
+    调用方需自行用经验系数估算。
+    """
+    kl = mm.daily_kline(symbol, days=days)
+    if kl:
+        log(f"  · {symbol} 日 K ← moomoo（{len(kl)} 根）")
+        return [{"date": k['date'], "close": k['close'],
+                 "volume": k['volume'], "turnover": k['turnover']} for k in kl]
+    try:
+        import akshare as ak
+        df = ak.stock_zh_index_daily(symbol=symbol).sort_values('date').tail(days)
+        out = [{"date": str(r['date'])[:10], "close": float(r['close']),
+                "volume": float(r['volume']), "turnover": None}
+               for _, r in df.iterrows()]
+        log(f"  · {symbol} 日 K ← 新浪回退（{len(out)} 根）")
+        return out
+    except Exception as e:
+        log(f"  ✗ {symbol} 日 K 两个源都失败: {e}")
+        return []
+
 # ── 4. HS300 HV30 ──────────────────────────────────────────
 def fetch_hv30():
     try:
-        import akshare as ak, math
-        # Sina 源稳定，东财接口偶尔 RemoteDisconnected
-        df = ak.stock_zh_index_daily(symbol="sh000300")
-        df = df.sort_values('date').reset_index(drop=True)
-        closes = df['close'].astype(float).tolist()
-        dates = df['date'].astype(str).tolist()
+        import math
+        # moomoo OpenD 优先；OpenD 没开时回退新浪（东财接口偶尔 RemoteDisconnected）
+        kl = index_daily("sh000300", days=1400)
+        if len(kl) < 60:
+            raise ValueError(f"日 K 太少（{len(kl)} 根），算不出 HV30")
+        closes = [k['close'] for k in kl]
+        dates = [k['date'] for k in kl]
         # 30 日年化 HV
         hv_series = []
         for i in range(30, len(closes)):
@@ -269,34 +300,34 @@ def fetch_margin():
         return fallback('margin')
 
 # ── 6. 近 7 日成交额 ────────────────────────────────────────
+# moomoo 日 K 直接带真实成交额（turnover，单位元），两市相加即全市场成交额。
+# OpenD 不可用时回退新浪 volume × 经验系数（旧实现，误差约 ±5%）。
+AMT_FACTOR = {"sh000001": 19.1, "sz399001": 20.8}   # 新浪回退用：元/股 经验均价
+
 def fetch_vol_7d():
-    """新浪源 stock_zh_index_daily + 经验换算系数（同 proxy.py 实现，规避东财 TLS 限制）"""
     try:
-        import akshare as ak
-        AMT_FACTOR = {"sh000001": 19.1, "sz399001": 20.8}
-        def _close_vol(sym):
-            df = ak.stock_zh_index_daily(symbol=sym).sort_values('date').tail(7).reset_index(drop=True)
-            df['date'] = df['date'].astype(str)
-            return df
-        sh = _close_vol("sh000001")
-        sz = _close_vol("sz399001")
-        n = min(len(sh), len(sz))
+        sh = index_daily("sh000001", days=7)
+        sz = index_daily("sz399001", days=7)
+        if not sh or not sz:
+            raise ValueError("指数日 K 为空")
+        sz_amt = {}
+        for k in sz:
+            sz_amt[k['date']] = (k['turnover'] if k['turnover']
+                                 else (k['volume'] or 0) * AMT_FACTOR['sz399001'])
+        real = all(k['turnover'] for k in sh) and all(k['turnover'] for k in sz)
         out = []
-        for i in range(n):
-            d = sh.iloc[i]['date']
-            # 估算成交额（亿）= close × volume(股) × factor / 1e8
-            amt_sh = float(sh.iloc[i]['close']) * float(sh.iloc[i]['volume']) * AMT_FACTOR['sh000001'] / 1e8
-            amt_sz = float(sz.iloc[i]['close']) * float(sz.iloc[i]['volume']) * AMT_FACTOR['sz399001'] / 1e8
-            # 上面那个估算偏大；真正实测：amt ≈ volume(股) × avgPrice ≈ volume × close / 100
-            # 实际：沪深两市日成交≈ 1-2 万亿，volume sh000001 在 60-80 亿股，close ~4000 → close*vol=2.5e14
-            # 简化：实际 amount/volume ratio 实测大概是 19-21 (元/股 平均价位)
-            # 用经验系数：amt = volume × factor (yuan)，factor 取上面 AMT_FACTOR
-            amt_sh = float(sh.iloc[i]['volume']) * AMT_FACTOR['sh000001'] / 1e8
-            amt_sz = float(sz.iloc[i]['volume']) * AMT_FACTOR['sz399001'] / 1e8
-            total = amt_sh + amt_sz
+        for k in sh:
+            d = k['date']
+            if d not in sz_amt:
+                continue
+            amt_sh = k['turnover'] if k['turnover'] else (k['volume'] or 0) * AMT_FACTOR['sh000001']
+            total = (amt_sh + sz_amt[d]) / 1e8          # → 亿元
             out.append({"d": f"{int(d[5:7])}/{int(d[8:10])}", "v": int(round(total))})
-        log(f"  ✓ vol_7d {len(out)} 天（新浪估算），最新 {out[-1]['v']} 亿")
-        return out
+        if not out:
+            raise ValueError("沪深日 K 日期对不上")
+        log(f"  ✓ vol_7d {len(out)} 天（{'moomoo 实际成交额' if real else '新浪估算'}），"
+            f"最新 {out[-1]['v']} 亿")
+        return out[-7:]
     except Exception as e:
         log(f"  ✗ vol_7d 失败: {e}")
         traceback.print_exc()
@@ -452,7 +483,8 @@ def fetch_fund_issuance():
 
 # ── 11. ETF 资金分类流向（沪市，60交易日净流入）───────────────
 # 数据源：上交所 ETF 份额（ak.fund_etf_scale_sse，按 STAT_DATE 取快照），
-#   现价来自 ak.fund_etf_spot_em。净流入 ≈ (份额_now − 份额_60d前) × 现价。
+#   现价首选 moomoo 快照（get_market_snapshot），OpenD 不可用时回退 ak.fund_etf_spot_em。
+#   净流入 ≈ (份额_now − 份额_60d前) × 现价。
 #   旧份额按现价计值以隔离价格因素，change_pct = 净流入/旧市值。
 #   分类由基金简称关键词判定，行业主题优先于宽基，「其他」占比约 0~2%。
 ETF_RULES = [
@@ -520,20 +552,37 @@ def _sse_find_valid(anchor, back_days):
         cur -= timedelta(days=1)
     return None, None
 
-def fetch_etf_categories():
+def _etf_prices(codes):
+    """ETF 现价 {6位代码: 价格}。moomoo 快照优先，回退东财 spot。"""
+    price = mm.last_prices(codes) if codes else None
+    if price:
+        log(f"  · ETF 现价 ← moomoo 快照（{len(price)}/{len(codes)} 只）")
+        if len(price) >= len(codes) * 0.8:
+            return price
     try:
         import akshare as ak
+        spot = ak.fund_etf_spot_em()
+        em = {str(r['代码']): float(r['最新价']) for _, r in spot.iterrows()
+              if r['最新价'] and float(r['最新价']) > 0}
+        log(f"  · ETF 现价 ← 东财 spot 回退（{len(em)} 只）")
+        if price:                      # moomoo 拿到一部分 → 合并，moomoo 优先
+            em.update(price)
+        return em
+    except Exception as e:
+        log(f"  ✗ ETF 现价东财回退失败: {e}")
+        return price or {}
+
+def fetch_etf_categories():
+    try:
         from datetime import timedelta
         from collections import defaultdict
-        # 现价
-        spot = ak.fund_etf_spot_em()
-        price = {str(r['代码']): float(r['最新价']) for _, r in spot.iterrows()
-                 if r['最新价'] and float(r['最新价']) > 0}
         # 最新 + 约60交易日前 两个份额快照
         df_now, date_now = _sse_find_valid(datetime.now(), 8)
         if df_now is None:
             log("  ✗ etf_categories: SSE 最新份额不可得")
             return fallback('etf_categories')
+        # 现价（只查当前有份额数据的这批代码）
+        price = _etf_prices([str(r['基金代码']) for _, r in df_now.iterrows()])
         anchor_old = datetime.strptime(date_now, '%Y-%m-%d') - timedelta(days=88)
         df_old, date_old = _sse_find_valid(anchor_old, 12)
         old_share = ({str(r['基金代码']): float(r['基金份额']) for _, r in df_old.iterrows()}
@@ -576,6 +625,10 @@ def main():
     t0 = time.time()
     log("=== update_arisk_data.py 开始 ===")
     log(f"  MX_APIKEY: {'已配置' if MX_KEY else '未配置（仅 AKShare 回退）'}")
+    st = mm.status()
+    log(f"  moomoo OpenD {st['host']}:{st['port']}: "
+        + ("已连接（行情走 moomoo）" if st['ok']
+           else f"不可用 → 行情回退 AKShare/新浪（{st['error']}）"))
 
     out = {
         "generated_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
@@ -617,4 +670,8 @@ def main():
     log(f"=== 完成（{time.time()-t0:.1f}s），输出 {OUT_PATH} ===")
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        rc = main()
+    finally:
+        mm.close()                  # 关掉 OpenD 连接，否则 SDK 后台线程会挂住进程
+    sys.exit(rc)

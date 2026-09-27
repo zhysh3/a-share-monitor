@@ -2,7 +2,8 @@
 
 一个本地运行的 A 股大盘风险监测看板：ERP 股权风险溢价、万得全A PE、10Y 国债、破净率、两市成交额×换手率、HV30 波动率、信贷脉冲（社融存量同比一阶导）、两融余额+动量、ETF 资金流向、申万行业热力图，以及一个「两层漏斗决策模型」给出综合仓位建议。
 
-数据每交易日收盘后自动抓取（AKShare + 央行官网直连 + 新浪/东财），本地静态页面渲染，**无需任何后端服务器**。
+行情数据走 **moomoo OpenAPI**（本机 moomoo OpenD 网关）；宏观数据（社融、国债、两融、申万行业）
+moomoo 不提供，仍走 AKShare + 央行官网直连。每交易日收盘后自动抓取，本地静态页面渲染，**无需任何后端服务器**。
 
 ![看板首页](docs/screenshot.png)
 
@@ -15,8 +16,9 @@
 | 文件 | 作用 |
 |---|---|
 | `arisk_monitor_local.html` | 看板本体（Chart.js 走 CDN，其余内联） |
+| `moomoo_market.py` | moomoo OpenAPI 适配层（连 OpenD，取日 K / 快照；OpenD 不可用时自动回退） |
 | `update_arisk_data.py` | 抓全量数据 → 生成 `arisk_data.json`（约 95 秒） |
-| `proxy.py` | 本地代理(8899)，供浏览器盘中实时抓数 + 妙想API 转发 |
+| `proxy.py` | 本地代理(8899)，盘中行情走 moomoo，兼做妙想API 转发与回退反代 |
 | `check_and_update.sh` | 判断数据是否落后于最新交易日，落后才更新 |
 | `run_arisk_update.sh` | 跑一次更新（被 check 调用，或手动） |
 | `start.sh` / `stop.sh` | 一键起停（代理 8899 + 静态服务器 8788） |
@@ -32,9 +34,11 @@ cd arisk
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
-# 2.（可选）配妙想 API key；不配也能跑，社融走央行直连
+# 2. 起 moomoo OpenD（行情主源），并配置连接参数
+#    下载 OpenD：https://www.moomoo.com/download/OpenAPI
+#    登录 moomoo 账号后默认监听 127.0.0.1:11111
 cp .env.example .env
-#   然后编辑 .env 填入 MX_APIKEY
+#   .env 里按需改 MOOMOO_HOST / MOOMOO_PORT；顺便可填妙想 MX_APIKEY（可选）
 
 # 3. 首次抓数
 ./venv/bin/python update_arisk_data.py
@@ -48,6 +52,29 @@ bash start.sh
 > ⚠️ **必须通过 `start.sh`（本地 http）打开，不能直接双击 HTML**——`file://` 协议下浏览器禁止读取本地 JSON，页面会空白。
 
 停止服务：`bash stop.sh`
+
+## moomoo 行情接入
+
+| 用途 | moomoo 接口 | OpenD 不可用时的回退 |
+|---|---|---|
+| 沪深指数日 K（HV30、走势） | `request_history_kline` | 新浪 `stock_zh_index_daily` |
+| 两市成交额（近 7 日 / 盘中） | 日 K `turnover` + 快照 `turnover` | 新浪 volume × 经验系数（误差 ±5%） |
+| 沪深300 现价/涨跌 | `get_market_snapshot` | `/index_kline` 最新收盘价 |
+| ETF 现价（资金流向折算） | `get_market_snapshot` | 东财 `fund_etf_spot_em` |
+
+- **权限**：沪深 LV1 行情即可（日 K + 快照）。没有行情权限时接口会报错，代码自动回退。
+- **代理新增端点**：`GET /index_kline?code=sh000300&days=60`（真实成交额）、
+  `GET /quote?code=sh000300,510300`（快照）、`GET /health`（各数据源自检）。
+- **不接 moomoo 也能跑**：`.env` 里设 `MOOMOO_ENABLED=0`，或干脆不启动 OpenD，
+  全部行情回退到 AKShare/新浪，只是成交额变成估算值。
+- 富途 `futu-api` 与 moomoo SDK 接口一致，装哪个都行（`moomoo_market.py` 优先 import `moomoo`）。
+
+自检：
+
+```bash
+./venv/bin/python moomoo_market.py      # 打印连接状态 + 沪深300 最近 5 根日K
+curl -s localhost:8899/health | python3 -m json.tool
+```
 
 ## 每日自动更新
 
@@ -63,8 +90,9 @@ bash start.sh
 
 ## 已知限制
 
-- **数据源在中国境内**（东财/新浪/央行）。海外服务器直连可能受限或较慢，`proxy.py` 已用 `curl_cffi` 模拟 Chrome TLS 指纹绕过部分反爬；仍不通时需自行加代理。
-- 本仓库的 `proxy.py` 为**通用反代版**，未实现看板期望的部分语义端点（`/pe` `/bond` `/index_kline` 等）。这些盘中 live-refresh 会回退到 `arisk_data.json`——由于该 JSON 每日自动更新，数据整体仍是新的，只是缺分钟级盘中刷新。
+- **moomoo OpenD 必须和本项目同机（或内网可达）**，且账号要有沪深行情权限；OpenD 断开时行情自动回退。
+- **宏观数据 moomoo 不提供**：社融、10Y 国债、两融余额、申万行业、涨跌停家数、基金新发仍走 AKShare / 央行官网，这部分数据源在中国境内，海外服务器直连可能受限或较慢（`proxy.py` 用 `curl_cffi` 模拟 Chrome TLS 指纹绕过部分反爬，仍不通时需自行加代理）。
+- 全 A 换手率用交易所口径的成交额/流通市值（`stock_sse_deal_daily` + `stock_szse_summary`），moomoo 快照只有个股换手率，故未替换。
 - 妙想 API（`MX_APIKEY`）为可选增强，缺省走 AKShare/央行回退。
 
 ## 安全
