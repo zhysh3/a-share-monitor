@@ -1,5 +1,14 @@
 # 密钥 —— 绝不提交
 .env
+.env.*
+!.env.example
+
+# moomoo OpenD 的配置/日志：OpenD.xml 里存着账号、登录密码与交易解锁密码
+OpenD.xml
+opend.xml
+OpenD*.log
+FTNNQuote*.log
+moomoo_opend/
 
 # Python 虚拟环境（166MB，各平台自建）
 venv/

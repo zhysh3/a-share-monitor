@@ -365,7 +365,7 @@ html{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14
     <div id="ai-body"><div style="font-size:11px;color:#5b21b6;font-family:var(--mono);padding:3px 0;line-height:1.8">点击「AI验证」，Claude 通过网络搜索最新数据，<strong>差异&gt;2%时自动修正</strong>面板数据。</div></div>
   </div>
   <div class="dnote fi" style="animation-delay:.26s">
-    <strong>数据来源</strong>：PE/PB/国债/两融/ETF来自东财实时接口，社融/行业资金流来自东财数据中心，HV30来自新浪K线（需代理），妙想API作为补充。<strong>AI验证</strong>：差异&gt;2%时<span style="color:#ea580c;font-weight:600">自动修正</span>。<br>
+    <strong>数据来源</strong>：指数K线/成交额/现价/ETF现价来自 moomoo OpenAPI（本机 OpenD；未连接时回退新浪、成交额转为估算），HV30 基于沪深300日K计算；PE/两融/社融/行业资金流来自东财与央行，妙想API作为补充。<strong>AI验证</strong>：差异&gt;2%时<span style="color:#ea580c;font-weight:600">自动修正</span>。<br>
     <span id="cnote" style="color:var(--accent)">缓存数据（32分钟前）。</span>
   </div>
 </div>
@@ -641,7 +641,19 @@ function flashMC(id){const e=$(id);if(!e)return;e.classList.remove('just-updated
 function dmBadge(label,scheme){const c={ok:'dmb-ok',warn:'dmb-warn',danger:'dmb-danger',neutral:'dmb-neutral'}[scheme]||'dmb-neutral';return '<span class="dm-badge '+c+'">'+label+'</span>';}
 
 /* ═══ FETCH ═══ */
-async function fetchVolFromSina(){
+/* 今日两市成交额（元）— 主源 moomoo 快照 /quote，回退新浪 hq
+   返回 {v:成交额, src:'moomoo'|'新浪实时'} 或 null */
+async function fetchLiveVolume(){
+  // 1. moomoo OpenD 快照：turnover 为交易所口径真实成交额
+  try{
+    const r=await fetch('http://localhost:8899/quote?code=sh000001,sz399001',{cache:'no-cache'});
+    if(r.ok){
+      const j=await r.json();let tot=0;
+      for(const k of Object.keys(j||{})){const a=parseFloat(j[k]&&j[k].amount);if(a>0)tot+=a;}
+      if(tot>1e12)return{v:tot,src:'moomoo实时'};
+    }
+  }catch(e){}
+  // 2. 新浪回退（OpenD 未连接/无行情权限时）
   try{
     const proxyBase='http://localhost:8899/?url=';
     const target=encodeURIComponent('https://hq.sinajs.cn/list=sh000001,sz399001');
@@ -651,7 +663,7 @@ async function fetchVolFromSina(){
       const m=line.match(/"(.+)"/);if(!m)continue;
       const v=parseFloat(m[1].split(',')[9]);if(v>0)tot+=v;
     }
-    return tot>1e12?tot:null;
+    return tot>1e12?{v:tot,src:'新浪实时'}:null;
   }catch(e){return null;}
 }
 
@@ -674,7 +686,8 @@ async function fetchTurnFromClist(){
    RPT_MUTUAL_MARKET_SH 或 RPT_MARKET_TURNOVER:
    TRADE_DATE, MARKET_TURNOVER(成交额亿元), EXCHANGE_RATE(换手率%) */
 /* 拉沪+深历史 K 线，合并成交额 → [{date,label,close,amtYuan,turn}, ...]
-   走 proxy /index_kline (新浪源稳定，amt 字段已经过经验系数校准) */
+   走 proxy /index_kline：主源 moomoo OpenD（amt 为真实成交额），
+   OpenD 不可用时回退新浪（amt 走经验系数估算） */
 async function fetchKline(secid, lmt){
   try{
     const [rSH,rSZ]=await Promise.all([
@@ -692,7 +705,7 @@ async function fetchKline(secid, lmt){
         label:parseInt(parts[1])+'/'+parseInt(parts[2]),
         close:k.close||0,
         amtYuan:(k.amt||0)+(szMap[k.d]||0),
-        turn:0,  // 新浪源不提供换手率，用 fetchTurnFromClist 实时获取
+        turn:0,  // 日K不带全市场换手率，由预构建 turnover 或 estimateTurn 提供
       };
     }).filter(x=>x.amtYuan>1e11);
   }catch(e){return[];}
@@ -770,8 +783,15 @@ async function fetchBondKline(lmt){
   return[];
 }
 
-/* 沪深300指数现价 → /index_kline (新浪源最新收盘价) */
+/* 沪深300指数现价 → moomoo 快照 /quote，回退 /index_kline 最新收盘价 */
 async function fetchMarketOverview(){
+  try{
+    const r=await fetch('http://localhost:8899/quote?code=sh000300',{cache:'no-cache'});
+    if(r.ok){
+      const j=await r.json();const q=j&&j['SH.000300'];
+      if(q&&q.price>0)return{hs300:q.price,hs300_pct:q.pct};
+    }
+  }catch(e){}
   try{
     const r=await fetch('http://localhost:8899/index_kline?code=sh000300&days=2',{cache:'no-cache'});
     if(!r.ok)return{};
@@ -966,7 +986,10 @@ async function fetchAll(force){
   let volYuan=null,avgTurn=null,shKlines=[],sectorLive=[],volSource='加载中';
 
   setL('获取今日成交额...','[1/6]');
-  try{const v=await Promise.race([fetchVolFromSina(),new Promise((_,rej)=>setTimeout(rej,4000))]);if(v&&v>5e12){volYuan=v;volSource='新浪实时';}}catch(e){}
+  // 阈值 1e12：两市合计成交额约 1.5~3 万亿元，旧值 5e12（5万亿）实测从未触发，
+  // 导致 volYuan 恒为 null、页脚数据来源恒显示"加载中"、estimateTurn 也拿不到值。
+  // fetchLiveVolume 内部已按 >1e12 过滤掉半截/停牌数据，这里与之对齐。
+  try{const v=await Promise.race([fetchLiveVolume(),new Promise((_,rej)=>setTimeout(rej,4000))]);if(v&&v.v>1e12){volYuan=v.v;volSource=v.src;}}catch(e){}
 
   setL('获取估值/国债/沪深300/ETF/社融...','[2/6]');
   const _bondKlineP=Promise.race([fetchBondKline(30),new Promise((_,rej)=>setTimeout(rej,10000))]).catch(()=>[]);
