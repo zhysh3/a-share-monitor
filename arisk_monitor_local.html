@@ -365,7 +365,7 @@ html{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14
     <div id="ai-body"><div style="font-size:11px;color:#5b21b6;font-family:var(--mono);padding:3px 0;line-height:1.8">点击「AI验证」，Claude 通过网络搜索最新数据，<strong>差异&gt;2%时自动修正</strong>面板数据。</div></div>
   </div>
   <div class="dnote fi" style="animation-delay:.26s">
-    <strong>数据来源</strong>：PE/PB/国债/两融/ETF来自东财实时接口，社融/行业资金流来自东财数据中心，HV30来自新浪K线（需代理），妙想API作为补充。<strong>AI验证</strong>：差异&gt;2%时<span style="color:#ea580c;font-weight:600">自动修正</span>。<br>
+    <strong>数据来源</strong>：指数K线/成交额/现价/ETF现价来自 moomoo OpenAPI（本机 OpenD；未连接时回退新浪、成交额转为估算），HV30 基于沪深300日K计算；PE/两融/社融/行业资金流来自东财与央行，妙想API作为补充。<strong>AI验证</strong>：差异&gt;2%时<span style="color:#ea580c;font-weight:600">自动修正</span>。<br>
     <span id="cnote" style="color:var(--accent)">缓存数据（32分钟前）。</span>
   </div>
 </div>
@@ -986,7 +986,10 @@ async function fetchAll(force){
   let volYuan=null,avgTurn=null,shKlines=[],sectorLive=[],volSource='加载中';
 
   setL('获取今日成交额...','[1/6]');
-  try{const v=await Promise.race([fetchLiveVolume(),new Promise((_,rej)=>setTimeout(rej,4000))]);if(v&&v.v>5e12){volYuan=v.v;volSource=v.src;}}catch(e){}
+  // 阈值 1e12：两市合计成交额约 1.5~3 万亿元，旧值 5e12（5万亿）实测从未触发，
+  // 导致 volYuan 恒为 null、页脚数据来源恒显示"加载中"、estimateTurn 也拿不到值。
+  // fetchLiveVolume 内部已按 >1e12 过滤掉半截/停牌数据，这里与之对齐。
+  try{const v=await Promise.race([fetchLiveVolume(),new Promise((_,rej)=>setTimeout(rej,4000))]);if(v&&v.v>1e12){volYuan=v.v;volSource=v.src;}}catch(e){}
 
   setL('获取估值/国债/沪深300/ETF/社融...','[2/6]');
   const _bondKlineP=Promise.race([fetchBondKline(30),new Promise((_,rej)=>setTimeout(rej,10000))]).catch(()=>[]);
