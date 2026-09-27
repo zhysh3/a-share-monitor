@@ -97,4 +97,15 @@ curl -s localhost:8899/health | python3 -m json.tool
 
 ## 安全
 
-`.env` 含你的 API key，已被 `.gitignore` 排除。**切勿把真实 `.env` 提交或分享。** 如误提交，请立即在东财后台吊销并更换 key。
+- **moomoo 没有 API key**：OpenAPI 的身份认证在 OpenD 那一层——你在本机启动 OpenD 并用
+  moomoo 账号登录，本项目只是连本地 11111 端口，仓库里不存在、也不需要任何 moomoo 密钥。
+  `.env` 里的 `MOOMOO_HOST/PORT/ENABLED` 只是连接参数，不是凭证。
+- **OpenD 的配置文件才是敏感文件**：`OpenD.xml` 里存着账号、登录密码和交易解锁密码。
+  别把它放进本仓库目录（已加进 `.gitignore` 兜底），更别提交。
+- **OpenD 端口没有鉴权**：任何能连上 11111 的进程都能用你的账号拿行情、乃至下单（如果开了交易）。
+  保持 `MOOMOO_HOST=127.0.0.1`，不要把 OpenD 绑到 `0.0.0.0` 或暴露到公网；需要跨机访问就走 SSH 隧道。
+- **本项目只用行情接口**（`OpenQuoteContext`），不碰交易接口，因此不需要交易解锁密码。
+- `.env` 含你的妙想 API key（可选），已被 `.gitignore` 排除。**切勿把真实 `.env` 提交或分享。**
+  如误提交，请立即在东财后台吊销并更换 key。
+- 看板里 `datacenter-web.eastmoney.com` 那个 `token=894050c...` 是东财公开数据接口的通用 token
+  （各处公开项目都在用），不是你的个人凭证；介意的话删掉该回退分支即可。
